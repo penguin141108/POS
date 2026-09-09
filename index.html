@@ -40,6 +40,18 @@
   .sheet li{font-size:18px;padding:5px 0;} .sheet li .m{font-weight:900;margin-right:8px;}
   .can .m{color:var(--good);} .cannot .m{color:#c05b5b;} .cannot li{color:var(--sub);}
   .logs{font-size:14px;} .logrow{border-top:1px solid #e2ecf5;padding:8px 0;}
+  #a_title{width:100%;border:2px solid #c7d6e5;border-radius:10px;padding:8px 10px;font-size:18px;font-family:inherit;}
+  .admrow{margin:10px 0;} .admrow>label{display:block;font-size:14px;color:var(--sub);margin-bottom:4px;font-weight:900;}
+  .admlab{font-weight:900;margin:14px 0 6px;font-size:16px;}
+  .admitem{display:flex;gap:10px;border:2px solid #e2ecf5;border-radius:14px;padding:10px;margin-bottom:10px;align-items:center;}
+  .admthumb{width:70px;height:70px;flex:0 0 70px;border:1px solid #dce7f1;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--sub);overflow:hidden;text-align:center;}
+  .admthumb img{width:100%;height:100%;object-fit:contain;}
+  .admfields{flex:1;display:flex;flex-direction:column;gap:6px;min-width:0;}
+  .admfields input{border:2px solid #c7d6e5;border-radius:8px;padding:6px 8px;font-size:15px;font-family:inherit;}
+  .admfile{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+  .mini{font-size:12px;color:var(--sub);}
+  .btn.small{font-size:13px;padding:7px 12px;}
+  .admnote{font-size:12px;color:var(--sub);margin-top:10px;line-height:1.6;}
 </style>
 
 <div class="wrap">
@@ -47,8 +59,9 @@
     <button class="spk" id="readAll" title="念題目">🔊</button>
     <div class="title" id="title"></div>
     <label class="name">姓名<input id="uname" placeholder="(工作人員填)" /></label>
+    <button class="spk" id="adminBtn" title="後台設定" style="background:#6b7f92;font-size:20px">⚙</button>
   </div>
-  <div class="hint">點圖片＝「我會做」，會打勾並念出來；再點一次取消。做完按「完成」。</div>
+  <div class="hint">按 🔊 會念題目導引（主標題念 3 次→停 10 秒→每個選項各念 3 次、念完停 10 秒）。點圖片就會打勾並念出來；再點一次取消。做完按「完成」。</div>
   <div class="grid" id="grid"></div>
   <div class="actions">
     <button class="btn done" id="doneBtn">完成 ✓</button>
@@ -58,6 +71,7 @@
 </div>
 
 <div class="ov" id="ov"><div class="sheet" id="sheet"></div></div>
+<div class="ov" id="adminOv"><div class="sheet" id="adminSheet"></div></div>
 
 <script>
 // ====== 內容設定：改這裡就能換題目與選項 ======
@@ -71,33 +85,62 @@ const CONFIG = {
   ]
 };
 const LOGKEY="erc_logs";
+const CFGKEY="erc_config";
+let DATA = CONFIG;
+try{ const s=JSON.parse(localStorage.getItem(CFGKEY)||"null"); if(s&&Array.isArray(s.items)) DATA=s; }catch(e){}
+function saveConfig(){ try{ localStorage.setItem(CFGKEY, JSON.stringify(DATA)); return true; }catch(e){ return false; } }
 
 const $=id=>document.getElementById(id);
 let selected=new Set();
 
-// ---------- speech ----------
-let spoke=false;
-function speak(t){ try{ speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(t); u.lang="zh-TW"; u.rate=.9;
-  const v=speechSynthesis.getVoices().find(v=>/zh|Chinese|Mandarin/i.test(v.lang+" "+v.name)); if(v)u.voice=v; speechSynthesis.speak(u);}catch(e){} }
-function speakSeq(list){ try{ speechSynthesis.cancel(); list.forEach(t=>{ const u=new SpeechSynthesisUtterance(t); u.lang="zh-TW"; u.rate=.9;
-  const v=speechSynthesis.getVoices().find(v=>/zh|Chinese|Mandarin/i.test(v.lang+" "+v.name)); if(v)u.voice=v; speechSynthesis.speak(u); }); }catch(e){} }
+// ---------- speech / audio ----------
+let spoke=false, curAudio=null;
+function stopAudio(){ if(curAudio){try{curAudio.pause();}catch(e){} curAudio=null;} try{speechSynthesis.cancel();}catch(e){} }
+function playVoice(text,audio,cb){
+  stopAudio();
+  if(audio){ try{ const a=new Audio(audio); curAudio=a; let done=false; const fin=()=>{if(done)return;done=true;if(curAudio===a)curAudio=null;cb&&cb();};
+      a.onended=fin; a.onerror=fin; const p=a.play(); if(p&&p.catch)p.catch(fin); setTimeout(fin,12000); }catch(e){ cb&&cb(); } }
+  else { try{ const u=new SpeechSynthesisUtterance(text); u.lang="zh-TW"; u.rate=.9;
+      const v=speechSynthesis.getVoices().find(v=>/zh|Chinese|Mandarin/i.test(v.lang+" "+v.name)); if(v)u.voice=v;
+      let done=false; const fin=()=>{if(done)return;done=true;cb&&cb();}; u.onend=fin; u.onerror=fin; speechSynthesis.speak(u); setTimeout(fin,5000); }catch(e){ cb&&cb(); } }
+}
+function speak(t){ playVoice(t,null,null); }
+let guiding=false, guideToken=0, guideTimer=null;
+function stopGuide(){ guiding=false; guideToken++; if(guideTimer){clearTimeout(guideTimer);guideTimer=null;} stopAudio(); const b=$("readAll"); if(b)b.textContent="🔊"; }
+function startGuide(){
+  stopGuide(); guiding=true; const my=++guideToken;
+  const steps=[];
+  for(let i=0;i<3;i++) steps.push({t:DATA.title, audio:DATA.titleAudio, gap:3000});     // 主標題念 3 次、每次間隔 3 秒
+  steps[steps.length-1].gap=10000;                                 // 標題念完停 10 秒
+  DATA.items.forEach(it=>{                                         // 每個選項各念 3 次、間隔 3 秒，念完停 10 秒
+    for(let i=0;i<3;i++) steps.push({t:it.label, audio:it.audio, gap:3000});
+    steps[steps.length-1].gap=10000;
+  });
+  steps[steps.length-1].gap=0;                                     // 最後一個念完即結束
+  $("readAll").textContent="⏹";
+  let idx=0;
+  const next=()=>{ if(my!==guideToken)return;
+    if(idx>=steps.length){ guiding=false; $("readAll").textContent="🔊"; return; }
+    const s=steps[idx++]; playVoice(s.t, s.audio, ()=>{ if(my!==guideToken)return; guideTimer=setTimeout(next, s.gap); }); };
+  next();
+}
 document.addEventListener("pointerdown",()=>{ if(!spoke){ spoke=true; try{const u=new SpeechSynthesisUtterance(" ");u.volume=0;speechSynthesis.speak(u);}catch(e){} } },{once:false,passive:true});
 
 // ---------- render ----------
-$("title").textContent=CONFIG.title;
+function applyData(){ $("title").textContent=DATA.title; render(); }
 function render(){
   $("grid").innerHTML="";
-  CONFIG.items.forEach((it,i)=>{
+  DATA.items.forEach((it,i)=>{
     const d=document.createElement("div"); d.className="item"+(selected.has(i)?" on":"");
     const pic = it.img ? `<img src="${it.img}" alt="">` : (it.emoji||"🖼️");
-    d.innerHTML=`<div class="chk">✓</div><div class="pic">${pic}</div><div class="lab">${it.label}</div>`;
-    d.onclick=()=>{ if(selected.has(i))selected.delete(i); else selected.add(i); render(); speak(it.label); };
+    d.innerHTML=`<div class="pic">${pic}</div><div class="lab">${it.label}</div>`;
+    d.onclick=()=>{ stopGuide(); if(selected.has(i))selected.delete(i); else selected.add(i); render(); playVoice(it.label, it.audio, null); };
     $("grid").appendChild(d);
   });
 }
-render();
+applyData();
 
-$("readAll").onclick=()=> speakSeq([CONFIG.title, ...CONFIG.items.map(i=>i.label)]);
+$("readAll").onclick=()=>{ if(guiding) stopGuide(); else startGuide(); };
 $("resetBtn").onclick=()=>{ selected.clear(); render(); };
 
 // ---------- done / record ----------
@@ -112,8 +155,8 @@ function summaryText(rec){
   return `【${rec.title}】\n姓名：${rec.name||"—"}　日期：${rec.date}\n\n我會做的：\n${can.join("\n")||"（無）"}\n\n還需要協助：\n${no.join("\n")||"（無）"}`;
 }
 function done(){
-  const rec={ title:CONFIG.title, name:$("uname").value.trim(), date:nowStr(),
-    items:CONFIG.items.map((it,i)=>({label:it.label,on:selected.has(i)})) };
+  const rec={ title:DATA.title, name:$("uname").value.trim(), date:nowStr(),
+    items:DATA.items.map((it,i)=>({label:it.label,on:selected.has(i)})) };
   saveLog(rec);
   const can=rec.items.filter(x=>x.on), no=rec.items.filter(x=>!x.on);
   $("sheet").innerHTML=`
@@ -150,4 +193,66 @@ $("logBtn").onclick=()=>{
   $("closeBtn").onclick=()=>$("ov").classList.remove("show");
   $("clearBtn").onclick=()=>{ if(confirm("確定清除這台裝置的所有紀錄？")){ try{localStorage.removeItem(LOGKEY);}catch(e){window._logs=[];} $("ov").classList.remove("show"); } };
 };
+// ---------- 後台設定 ----------
+let edit=null;
+function escapeAttr(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
+function fileToDataURI(input,cb){ const f=input.files&&input.files[0]; if(!f)return; const r=new FileReader(); r.onload=()=>cb(r.result); r.readAsDataURL(f); }
+function adminOpen(){ stopGuide(); edit=JSON.parse(JSON.stringify(DATA)); if(!edit.items)edit.items=[]; buildAdmin(); $("adminOv").classList.add("show"); }
+function adminClose(){ $("adminOv").classList.remove("show"); }
+function buildAdmin(){
+  $("adminSheet").innerHTML=`
+    <h2>後台設定</h2>
+    <div class="admrow"><label>主標題文字</label><input id="a_title" value="${escapeAttr(edit.title)}"></div>
+    <div class="admrow"><label>標題語音檔（可留空，改用系統語音）</label>
+      <input type="file" accept="audio/*" id="a_titleaudio">
+      <span class="mini">${edit.titleAudio?" 已上傳 ✓":" （無）"}</span>
+      ${edit.titleAudio?'<button class="btn ghost small" id="a_titleaudio_clr">清除</button>':''}</div>
+    <div class="admlab">選項</div>
+    <div id="a_items"></div>
+    <button class="btn ghost" id="a_add">＋ 新增選項</button>
+    <div class="actions" style="margin-top:16px">
+      <button class="btn done" id="a_save">儲存並套用</button>
+      <button class="btn ghost" id="a_cancel">取消</button></div>
+    <div class="actions">
+      <button class="btn ghost small" id="a_export">⬇ 匯出設定檔</button>
+      <label class="btn ghost small" style="cursor:pointer">⬆ 匯入設定檔<input type="file" accept="application/json,.json" id="a_import" style="display:none"></label>
+      <button class="btn ghost small" id="a_reset">還原預設</button></div>
+    <div class="admnote">圖片與音檔會存進設定檔，掛到 GitHub Pages 只需這一個 html。若音檔多、設定太大可能存不進裝置，請改用「匯出設定檔」保存並在各台匯入。</div>`;
+  $("a_title").oninput=e=>edit.title=e.target.value;
+  $("a_titleaudio").onchange=e=>fileToDataURI(e.target,u=>{edit.titleAudio=u;buildAdmin();});
+  const clr=$("a_titleaudio_clr"); if(clr)clr.onclick=()=>{edit.titleAudio="";buildAdmin();};
+  $("a_add").onclick=()=>{ edit.items.push({label:"新選項",img:"",audio:""}); renderAdminItems(); };
+  $("a_save").onclick=adminSave; $("a_cancel").onclick=adminClose;
+  $("a_export").onclick=adminExport; $("a_reset").onclick=adminReset;
+  $("a_import").onchange=e=>{ const f=e.target.files[0]; if(!f)return; const r=new FileReader();
+    r.onload=()=>{ try{ const j=JSON.parse(r.result); if(j&&Array.isArray(j.items)){ edit=j; buildAdmin(); } else alert("設定檔格式不正確"); }catch(err){ alert("無法讀取設定檔"); } }; r.readAsText(f); };
+  renderAdminItems();
+}
+function renderAdminItems(){
+  const c=$("a_items"); c.innerHTML="";
+  edit.items.forEach((it,i)=>{
+    const d=document.createElement("div"); d.className="admitem";
+    d.innerHTML=`
+      <div class="admthumb">${it.img?`<img src="${it.img}">`:"（無圖）"}</div>
+      <div class="admfields">
+        <input value="${escapeAttr(it.label)}" placeholder="選項文字" data-lab="${i}">
+        <div class="admfile">
+          <label class="mini">圖片 <input type="file" accept="image/*" data-img="${i}"></label>
+          <label class="mini">語音 <input type="file" accept="audio/*" data-aud="${i}"></label>
+          <span class="mini">${it.audio?"語音✓":""}</span>
+          <button class="btn ghost small" data-del="${i}">刪除</button></div>
+      </div>`;
+    c.appendChild(d);
+  });
+  c.querySelectorAll("[data-lab]").forEach(el=>el.oninput=()=>edit.items[+el.dataset.lab].label=el.value);
+  c.querySelectorAll("[data-img]").forEach(el=>el.onchange=()=>fileToDataURI(el,u=>{edit.items[+el.dataset.img].img=u;renderAdminItems();}));
+  c.querySelectorAll("[data-aud]").forEach(el=>el.onchange=()=>fileToDataURI(el,u=>{edit.items[+el.dataset.aud].audio=u;renderAdminItems();}));
+  c.querySelectorAll("[data-del]").forEach(el=>el.onclick=()=>{ edit.items.splice(+el.dataset.del,1); renderAdminItems(); });
+}
+function adminSave(){ DATA=edit; const ok=saveConfig(); selected.clear(); applyData(); adminClose();
+  if(!ok) alert("已套用到目前畫面，但設定太大、無法存進這台裝置的長期記憶。請用「匯出設定檔」保存，或減少音檔數量/大小。"); }
+function adminExport(){ const blob=new Blob([JSON.stringify(edit)],{type:"application/json"}); const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob); a.download="checklist-config.json"; document.body.appendChild(a); a.click(); a.remove(); }
+function adminReset(){ if(confirm("還原成內建預設內容？")){ edit=JSON.parse(JSON.stringify(CONFIG)); buildAdmin(); } }
+$("adminBtn").onclick=adminOpen;
 </script>
